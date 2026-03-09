@@ -63,4 +63,81 @@ def handle_turnstile(sb):
     sb.execute_script(_EXPAND_JS)
     for i in range(1, 11):
         if sb.execute_script(_SOLVED_JS):
-            print(
+            print("  ✅ Turnstile 通过")
+            return True
+        try:
+            c, wi = sb.execute_script(_COORDS_JS), sb.execute_script(_WININFO_JS)
+            if c:
+                bar = wi["oh"] - wi["ih"]
+                ax, ay = c["cx"] + wi["sx"], c["cy"] + wi["sy"] + (bar if bar > 0 else 0)
+                print(f"  🖱️ 模拟点击坐标 ({ax}, {ay})")
+                _xdotool_click(ax, ay)
+        except: pass
+        time.sleep(5)
+    return False
+
+def js_fill(sb, selector, text):
+    sb.execute_script(f'document.querySelector("{selector}").value = "{text}";')
+    sb.execute_script(f'document.querySelector("{selector}").dispatchEvent(new Event("input", {{bubbles:true}}));')
+
+# ============================================================
+#  Telegram 消息
+# ============================================================
+def send_msg(status, timer):
+    if not TG_TOKEN or not TG_ID: return
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()+8*3600))
+    text = f"🖥 {DYNAMIC_APP_NAME}\\n{status}\\n⏱️ 剩余: {timer}\\n📅 {now}"
+    try: requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": TG_ID, "text": text}, timeout=10)
+    except: pass
+
+# ============================================================
+#  主逻辑
+# ============================================================
+def run_task(sb, acc):
+    global DYNAMIC_APP_NAME
+    print(f"\n🚀 [ {acc['tag']} ] 正在处理: {acc['email']}")
+    
+    sb.uc_open_with_reconnect("https://justrunmy.app/id/Account/Login")
+    sb.wait_for_element('input[name="Email"]')
+    js_fill(sb, 'input[name="Email"]', acc['email'])
+    js_fill(sb, 'input[name="Password"]', acc['pwd'])
+    if sb.execute_script(_EXISTS_JS): handle_turnstile(sb)
+    sb.press_keys('input[name="Password"]', '\n')
+    time.sleep(5)
+
+    sb.open("https://justrunmy.app/panel")
+    sb.wait_for_element('h3.font-semibold')
+    DYNAMIC_APP_NAME = sb.get_text('h3.font-semibold')
+    sb.click('h3.font-semibold')
+    time.sleep(3)
+    
+    print("🖱️ 点击 Reset Timer 按钮...")
+    sb.click('button:contains("Reset Timer")')
+    time.sleep(3)
+    if sb.execute_script(_EXISTS_JS): handle_turnstile(sb)
+    sb.click('button:contains("Just Reset")')
+    time.sleep(8)
+    
+    sb.refresh()
+    time.sleep(4)
+    res = sb.get_text('span.font-mono.text-xl')
+    print(f"✅ {acc['tag']} 成功！剩余: {res}")
+    send_msg("✅ 续期完成", res)
+
+def main():
+    use_proxy = os.environ.get("USE_PROXY", "false").lower() == "true"
+    kwargs = {"uc": True, "test": True, "headless": False}
+    if use_proxy: kwargs["proxy"] = "http://127.0.0.1:8080"
+
+    with SB(**kwargs) as sb:
+        for acc in ACCOUNTS:
+            try:
+                run_task(sb, acc)
+                sb.delete_all_cookies()
+                time.sleep(2)
+            except Exception as e:
+                print(f"❌ {acc['tag']} 失败: {e}")
+                send_msg("❌ 运行失败", str(e)[:30])
+
+if __name__ == "__main__":
+    main()
