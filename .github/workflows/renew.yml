@@ -2,8 +2,9 @@ name: JustRunMy 自动续期
 on:
   workflow_dispatch:
   schedule:
-    # 每 3 小时启动一次检查（北京时间 0, 3, 6, 9... 点左右）
-    - cron: '0 */3 * * *'
+    # 每 12 小时检查一次（北京时间 0点和12点左右）
+    # 这样可以确保在 48 小时窗口内一定能捕捉到执行机会
+    - cron: '0 */12 * * *'
 
 jobs:
   setup:
@@ -15,41 +16,26 @@ jobs:
       - id: check-time
         shell: bash
         run: |
-          # 如果是手动触发，直接运行
+          # 1. 如果是手动触发，100% 运行
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             echo "should_run=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # 获取上次成功运行的时间戳 (GitHub API)
-          # 注意：如果你的文件名不是 renew.yml，请修改下面这一行
-          LAST_RUN=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/renew.yml/runs?status=success&per_page=1" \
-            | jq -r '.workflow_runs[0].created_at // "2000-01-01T00:00:00Z"')
-          
-          LAST_TS=$(date -d "$LAST_RUN" +%s)
-          NOW_TS=$(date +%s)
-          DIFF_HOURS=$(( (NOW_TS - LAST_TS) / 3600 ))
-          
-          echo "距离上次成功运行已过去 $DIFF_HOURS 小时"
+          # 2. 自动触发逻辑：利用日期判断
+          # 获取当前是这一年的第几天
+          DOY=$(date +%j)
+          # 获取当前小时
+          HOUR=$(date +%H)
 
-          if [ $DIFF_HOURS -lt 40 ]; then
-            echo "未达到 40 小时限制，跳过本次执行。"
-            echo "should_run=false" >> $GITHUB_OUTPUT
-          elif [ $DIFF_HOURS -ge 50 ]; then
-            echo "已超过 50 小时，强制触发！"
+          # 每 2 天运行一次 (当日期是偶数天，且在 0点-12点这个区间触发时)
+          # 这样能保证每 48 小时必定触发一次，且时间不固定（受 GitHub 调度延迟影响）
+          if [ $((10#$DOY % 2)) -eq 0 ] && [ $HOUR -lt 13 ]; then
+            echo "符合 48 小时周期，准备运行续期..."
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
-            # 在 40-50 小时之间，设置约 25% 的概率触发
-            # 因为每 3 小时检查一次，10 小时内大约有 3 次机会，25% 概率足以保证在这期间触发
-            RAND=$(( RANDOM % 100 ))
-            if [ $RAND -lt 25 ]; then
-              echo "随机命中触发！"
-              echo "should_run=true" >> $GITHUB_OUTPUT
-            else
-              echo "本次随机未命中，等待下次检查。"
-              echo "should_run=false" >> $GITHUB_OUTPUT
-            fi
+            echo "未到 48 小时周期，跳过。下次 12 小时后会再次检查。"
+            echo "should_run=false" >> $GITHUB_OUTPUT
           fi
 
       - id: set-matrix
@@ -80,24 +66,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 启动代理 (可选 - sing-box)
+      - name: 启动代理 (可选)
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
-          if [ -z "$PROXY_URL" ]; then
-            echo "未设置 PROXY_URL，将使用直连。"
-            exit 0
-          fi
-          echo "检测到 PROXY_URL，启动 sing-box 代理..."
+          if [ -z "$PROXY_URL" ]; then echo "直连模式"; exit 0; fi
           SINGBOX_VER="1.11.0"
           wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
           tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
           mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
-          chmod +x ./sing-box
           python proxy_handler.py
           nohup ./sing-box run -c config.json > singbox.log 2>&1 &
           sleep 3
-          echo "PROXY_URL=$PROXY_URL" >> $GITHUB_ENV
 
       - name: 安装环境依赖
         run: |
@@ -107,11 +87,10 @@ jobs:
           seleniumbase install chromedriver
 
       - name: 随机延迟 (防风控)
-        if: github.event_name == 'schedule'
         run: |
-          # 限制在 30 分钟内，防止 GitHub 强制停止任务
-          RANDOM_DELAY=$(( RANDOM % 1800 ))
-          echo "账号 ${{ matrix.account_index }} 随机延迟 $RANDOM_DELAY 秒后启动..."
+          # 随机延迟 0-20 分钟，增加随机性
+          RANDOM_DELAY=$(( RANDOM % 1200 ))
+          echo "延迟 $RANDOM_DELAY 秒..."
           sleep $RANDOM_DELAY
 
       - name: 运行续期脚本
@@ -120,7 +99,7 @@ jobs:
           JUSTRUNMY_PASSWORD: ${{ secrets[format('PWD_{0}', matrix.account_index)] }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_ID: ${{ secrets.TG_ID }}
-          PROXY_URL: ${{ env.PROXY_URL }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             python reset_timer.py
